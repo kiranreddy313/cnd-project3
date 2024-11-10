@@ -2,20 +2,102 @@ from flask import Flask, redirect, request, send_file, render_template
 import os
 import traceback
 from google.cloud import storage
-from PIL import Image, ExifTags
 import io
+import google.generativeai as genai
+import json
+import base64
 
 app = Flask(__name__)
 
-# Initialize Google Cloud Storage client
+genai.configure(api_key="AIzaSyB0fZ3NYWNqLHNdD_Vl-zMRc0ZcXVP9RFc")
+
+generation_config = {
+    "temperature": 1,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_output_tokens": 8192,
+    "response_mime_type": "text/plain",
+}
+
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    generation_config=generation_config,
+)
+
+def upload_to_gemini(image_bytes, mime_type=None):
+    """Uploads the image content to Gemini API and returns the response with a title and description."""
+    try:
+        chat_session = model.start_chat()
+
+        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        message = {
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": encoded_image
+                    }
+                },
+                {
+                    "text": "Please provide a title and description for the image."
+                }
+            ]
+        }
+
+        response = chat_session.send_message(message)
+
+        print("Response from Gemini API:", response.text)
+        return response.text
+
+    except Exception as e:
+        print(f"Error uploading to Gemini: {e}")
+        return None
+
+    except Exception as e:
+        print(f"Error uploading to Gemini: {e}")
+        return None
+
+
+def parse_gemini_response(response_text):
+    """Parses the plain text response from Gemini API to extract title and description."""
+    try:
+        lines = response_text.split("\n")
+        title = ""
+        description = ""
+
+        for line in lines:
+            if line.startswith("**Title:**"):
+                title = line.replace("**Title:**", "").strip()
+            elif line.startswith("**Description:**"):
+                description = line.replace("**Description:**", "").strip()
+
+        if not title:
+            title = "Unknown Title"
+        if not description:
+            description = "No description available."
+
+        return title, description
+    except Exception as e:
+        print(f"Error while parsing response: {e}")
+        return "Unknown Title", "No description available."
+
+def save_text_to_bucket(bucket, text, filename):
+    """Saves the caption and description as a .txt file in the bucket."""
+    try:
+        blob = bucket.blob(filename)
+        blob.upload_from_string(text, content_type='text/plain')
+        print(f"Text file '{filename}' saved to bucket '{bucket_name}'")
+    except Exception as e:
+        print(f"Error uploading text file to bucket: {e}")
+
 client = storage.Client()
-bucket_name = 'starry-fiber-434921-g7.appspot.com'  
+bucket_name = 'cndbucket-2'
 bucket = client.bucket(bucket_name)
 
 @app.route('/')
 def index():
-    print("GET /")
-
+    """Display the home page with file upload functionality."""
     index_html = """
     <!doctype html>
     <html>
@@ -36,36 +118,41 @@ def index():
         <h2>Uploaded Files</h2>
         <ul>
     """
-
     for file in list_files():
-        # Ensure image files are correctly recognized
         if file.lower().endswith(('.jpg', '.jpeg')):
             index_html += f"""
             <li>
                 <a href="/files/{file}">{file}</a><br>
-                <img src="/files/{file}" width="200" height="auto">
+                <img src="/image/{file}" width="200" height="auto">
             </li>
             """
-
     index_html += """
         </ul>
     </body>
     </html>
     """
-
     return index_html
-
 
 @app.route("/upload", methods=['POST'])
 def upload():
+    """Handle image upload and process it using Gemini API."""
     try:
-        print("POST /upload")
         file = request.files.get('form_file')
         if file:
-            # Upload the file to the Google Cloud Storage bucket
             blob = bucket.blob(file.filename)
             blob.upload_from_file(file, content_type=file.content_type)
             print(f"File uploaded to {bucket_name} as {file.filename}")
+
+            file.seek(0)
+            image_bytes = file.read()
+
+            response_text = upload_to_gemini(image_bytes, mime_type=file.content_type)
+            if response_text:
+                title, description = parse_gemini_response(response_text)
+
+                text_filename = f"{os.path.splitext(file.filename)[0]}.txt"
+                save_text_to_bucket(bucket, f"Title: {title}\nDescription: {description}", text_filename)
+
         else:
             print("No file uploaded")
     except Exception as e:
@@ -77,96 +164,29 @@ def upload():
 
 @app.route('/files')
 def list_files():
-    print("GET /files")
-
-    # List files in the Google Cloud Storage bucket
+    """List all uploaded image files."""
     blobs = client.list_blobs(bucket_name)
     files = [blob.name for blob in blobs if blob.name.lower().endswith(('.jpg', '.jpeg'))]
-
-    print(files)
     return files
-
 
 @app.route('/files/<filename>')
 def get_file(filename):
-    print("GET /files/" + filename)
-
-    # Download the file from the Google Cloud Storage bucket
+    """Serve the file."""
     blob = bucket.blob(filename)
     file_data = blob.download_as_bytes()
 
-    # Initialize an empty HTML string
-    image_html = "<h2>" + filename + "</h2>"
+    file_html = f"<h2>{filename}</h2>"
+    file_html += f'<img src="/image/{filename}" width="500" height="auto">'
+    file_html += '<br><a href="/">Back</a>'
 
-    # Insert the image tag
-    image_html += f'<img src="/image/{filename}" width="500" height="333">'
-
-    # Open the image and retrieve its EXIF metadata
-    image = Image.open(io.BytesIO(file_data))
-    exifdata = image._getexif()
-
-    # Extract other basic metadata
-    info_dict = {
-        "Filename": filename,
-        "Image Size": image.size,
-        "Image Height": image.height,
-        "Image Width": image.width,
-        "Image Format": image.format,
-        "Image Mode": image.mode,
-        "Image is Animated": getattr(image, "is_animated", False),
-        "Frames in Image": getattr(image, "n_frames", 1)
-    }
-
-    # Create an HTML table for metadata
-    image_html += '<table border="1" width="500">'
-    for label, value in info_dict.items():
-        image_html += f'<tr><td>{label}</td><td>{value}</td></tr>'
-        print(f"{label:25}: {value}")
-
-    # Add EXIF data to the table if available
-    if exifdata is not None:
-        for tagid, value in exifdata.items():
-            tagname = ExifTags.TAGS.get(tagid, tagid)
-            image_html += f'<tr><td>{tagname}</td><td>{value}</td></tr>'
-    else:
-        image_html += '<tr><td>EXIF data not available</td></tr>'
-
-    # Close the table
-    image_html += "</table>"
-
-    # Add a "Back" link to return to the root
-    image_html += '<br><a href="/">Back</a>'
-
-    # Return the generated HTML
-    return image_html
-
+    return file_html
 
 @app.route('/image/<filename>')
 def get_image(filename):
-    print('GET /image/' + filename)
-
-    # Download the image from Google Cloud Storage and send it
+    """Serve the image file."""
     blob = bucket.blob(filename)
     file_data = blob.download_as_bytes()
-
     return send_file(io.BytesIO(file_data), mimetype='image/jpeg')
-
-
-@app.route('/signin')
-def signin():
-    return render_template('signin.html')
-
-
-@app.route('/signup')
-def signup():
-    return render_template('signup.html')
-
-
-@app.route('/reset_password')
-def reset_password():
-    return render_template('reset_password.html')
-
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
