@@ -1,14 +1,20 @@
-# Copy the current directory contents into the container at /app
-COPY . /app
+# Use the official Python base image
+FROM python:3.9-slim
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Set the working directory in the container
+WORKDIR /app
 
-# Make port 8080 available to the world outside this container
+# Copy the requirements file into the container
+COPY requirements.txt .
+
+# Install dependencies
+RUN pip install -r requirements.txt
+
+# Copy the rest of the application into the container
+COPY . .
+
+# Expose the port that the app runs on
 EXPOSE 8080
 
-# Define environment variable
-ENV PYTHONUNBUFFERED=1
-
-# Run the application
+# Command to run the application
 CMD ["python", "project1.py"]
