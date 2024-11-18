@@ -117,7 +117,7 @@ def index():
         <title>File Upload</title>
         <style>
             body {
-                background-color: blue;
+                background-color: green;
                 color: white; 
                 font-family: Arial, sans-serif;
             }
