@@ -9,7 +9,11 @@ import base64
 
 app = Flask(__name__)
 
-genai.configure(api_key="AIzaSyB0fZ3NYWNqLHNdD_Vl-zMRc0ZcXVP9RFc")
+api_key = os.environ.get('GEMINI_API_KEY')
+
+
+
+genai.configure(api_key=api_key)
 
 generation_config = {
     "temperature": 1,
@@ -54,11 +58,6 @@ def upload_to_gemini(image_bytes, mime_type=None):
         print(f"Error uploading to Gemini: {e}")
         return None
 
-    except Exception as e:
-        print(f"Error uploading to Gemini: {e}")
-        return None
-
-
 def parse_gemini_response(response_text):
     """Parses the plain text response from Gemini API to extract title and description."""
     try:
@@ -91,18 +90,63 @@ def save_text_to_bucket(bucket, text, filename):
     except Exception as e:
         print(f"Error uploading text file to bucket: {e}")
 
+def retrieve_text_from_bucket(text_file):
+    """Retrieve the title and description from the .txt file in the bucket."""
+    try:
+        blob = bucket.blob(text_file)
+        text_content = blob.download_as_text()
+        lines = text_content.splitlines()
+        title = lines[0].replace("Title: ", "") if lines else "Unknown Title"
+        description = lines[1].replace("Description: ", "") if len(lines) > 1 else "No description available."
+        return title, description
+    except Exception as e:
+        print(f"Error retrieving text from bucket: {e}")
+        return "Unknown Title", "No description available."
+
 client = storage.Client()
 bucket_name = 'cndbucket-2'
 bucket = client.bucket(bucket_name)
 
 @app.route('/')
 def index():
-    """Display the home page with file upload functionality."""
+    """Display the home page with file upload and management functionality."""
     index_html = """
     <!doctype html>
     <html>
     <head>
         <title>File Upload</title>
+        <style>
+            body {
+                background-color: blue;
+                color: white; 
+                font-family: Arial, sans-serif;
+            }
+            h1, h2 {
+                text-align: center;
+            }
+            form {
+                margin: 20px;
+                text-align: center;
+            }
+            ul {
+                list-style-type: none;
+                padding: 0;
+            }
+            li {
+                margin: 10px 0;
+                text-align: center;
+            }
+            img {
+                border: 2px solid white; 
+            }
+            button {
+                background-color: red;
+                color: white;
+                border: none;
+                padding: 5px 10px;
+                cursor: pointer;
+            }
+        </style>
     </head>
     <body>
         <h1>Upload and View Images</h1>
@@ -120,10 +164,18 @@ def index():
     """
     for file in list_files():
         if file.lower().endswith(('.jpg', '.jpeg')):
+            # Retrieve title and description
+            text_file = f"{os.path.splitext(file)[0]}.txt"
+            title, description = retrieve_text_from_bucket(text_file)
             index_html += f"""
             <li>
-                <a href="/files/{file}">{file}</a><br>
-                <img src="/image/{file}" width="200" height="auto">
+                <a href="/files/{file}" style="color: white;">{file}</a><br>
+                <img src="/image/{file}" width="200" height="auto"><br>
+                <strong>Title:</strong> {title}<br>
+                <strong>Description:</strong> {description}<br>
+                <form method="post" action="/delete/{file}" style="display:inline;">
+                    <button type="submit">Delete</button>
+                </form>
             </li>
             """
     index_html += """
@@ -161,7 +213,6 @@ def upload():
 
     return redirect('/')
 
-
 @app.route('/files')
 def list_files():
     """List all uploaded image files."""
@@ -175,10 +226,38 @@ def get_file(filename):
     blob = bucket.blob(filename)
     file_data = blob.download_as_bytes()
 
-    file_html = f"<h2>{filename}</h2>"
-    file_html += f'<img src="/image/{filename}" width="500" height="auto">'
-    file_html += '<br><a href="/">Back</a>'
-
+    file_html = f"""
+    <!doctype html>
+    <html>
+    <head>
+        <title>{filename}</title>
+        <style>
+            body {{
+                background-color: blue;
+                color: white;
+                font-family: Arial, sans-serif;
+            }}
+            h2 {{
+                text-align: center;
+            }}
+            a {{
+                color: white;
+                text-decoration: none;
+            }}
+            img {{
+                display: block;
+                margin: 0 auto;
+                border: 2px solid white;
+            }}
+        </style>
+    </head>
+    <body>
+        <h2>{filename}</h2>
+        <img src="/image/{filename}" width="500" height="auto">
+        <br><a href="/">Back</a>
+    </body>
+    </html>
+    """
     return file_html
 
 @app.route('/image/<filename>')
@@ -187,6 +266,24 @@ def get_image(filename):
     blob = bucket.blob(filename)
     file_data = blob.download_as_bytes()
     return send_file(io.BytesIO(file_data), mimetype='image/jpeg')
+
+@app.route('/delete/<filename>', methods=['POST'])
+def delete_file(filename):
+    """Delete the image and its associated .txt file."""
+    try:
+        blob = bucket.blob(filename)
+        blob.delete()
+        print(f"Deleted {filename} from bucket {bucket_name}")
+        
+        # Delete associated text file
+        text_file = f"{os.path.splitext(filename)[0]}.txt"
+        text_blob = bucket.blob(text_file)
+        text_blob.delete()
+        print(f"Deleted {text_file} from bucket {bucket_name}")
+    except Exception as e:
+        print(f"Error deleting file: {e}")
+    
+    return redirect('/')
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
